@@ -1,0 +1,20 @@
+P1 & Cross-account: overshoot under check-then-commit, READ COMMITTED, REPEATABLE READ, source lock, unlocked reservation & Held \\
+P1 & Cross-account: zero overshoot under SERIALIZABLE, invariant-row lock, atomic reservation & \textbf{Failed.} Reservation overshot 16 times: a two-statement read. A post hoc one-statement read gave 0 across both workloads. \\
+P2 & Same-account: overshoot under check-then-commit and READ COMMITTED & Held \\
+P2 & Same-account: zero overshoot under REPEATABLE READ, SERIALIZABLE, both locks & Held \\
+P3 & Lock modes lose no lawful transfers & Held \\
+P3 & Same-account lawful: REPEATABLE READ and SERIALIZABLE retry and lose some transfers at the retry cap & Held \\
+P3 & Cross-account lawful: REPEATABLE READ needs no retries & Held \\
+P4 & C6 removes overlap failures, leaving only families with an administrative change between review and commit & Held \\
+P4 & 32 \texttt{revoked\_grant} episodes remain under C6 & \textbf{Failed.} 64 remain; the predicted count was wrong. \\
+P4 & C6 false rejection rate within 1 point of C2 & \textbf{Failed.} C6 14.0\%, C2 3.6\%. 109 of C6's false rejections are in harmful episodes, before later commits that would have used the capacity; the rest are mainly authorization arriving after review. \\
+P5 & C2 commits zero violations when $w=1$ or $\rho\le 1$ ($g=0$) & Held \\
+P5 & C2 violation rate rises with $w$ and with $\rho$ & Held \\
+P5 & Overshoot bound never breached (C2, C3) & Held \\
+P5 & Bound not vacuous: worst overshoot above half the bound at some $w\ge 4$ & Held \\
+P5 & C6 zero violations at $g=0$, some at $g=1$ & Held \\
+P5 & C4 and C5 zero violations everywhere & Held \\
+P5 & C6 completes less than C4 at $q>0$, $\rho\ge 1$ (tested at $\rho=1$ and $1.5$) & \textbf{Failed.} Tie at $\rho=1$, where all demand fits. At $\rho=1.5$: 94.7\% vs.\ 98.3\%. \\
+P5 & C6 and C4 complete the same at $q=0$ & \textbf{Failed.} Differ by 0.05 points: they fill capacity in different orders. \\
+P6 & C0 minus C2 gap positive in over 99\% of family mixes & Held \\
+P6 & Share surviving C2 spans over 20 points across mixes & Held \\

@@ -1,0 +1,9 @@
+Check, then commit & 1,200 & 1,200 & 0 & 0 & 0.0 & 0.0 \\
+Guard at READ COMMITTED & 1,199 & 1,200 & 0 & 0 & 0.0 & 0.0 \\
+Guard at REPEATABLE READ & 0 & 1,200 & 563 & 0 & 10.7 & 0.0 \\
+Guard at SERIALIZABLE & 0 & 0 & 579 & 458 & 10.8 & 10.1 \\
+Guard + lock on source account & 0 & 1,200 & 0 & 0 & 0.0 & 0.0 \\
+Guard + lock on invariant's row & 0 & 0 & 0 & 0 & 0.0 & 0.0 \\
+Reservation, no lock & 1,200 & 1,200 & 0 & 0 & 0.0 & 0.0 \\
+Reservation, lock, two-statement read & 23 & 16 & 0 & 0 & 0.0 & 0.0 \\
+Reservation, lock, one-statement read & 0 & 0 & 0 & 0 & 0.0 & 0.0 \\

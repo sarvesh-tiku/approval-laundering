@@ -1,0 +1,6 @@
+# Global invariants. All money is integer US cents; all durations are seconds.
+default:
+  rolling_window_seconds: 86400     # Rule A window: half-open (t - W, t]
+  transfer_ceiling_cents: 1000000   # Rule A: $10,000 per account per window, unless a grant raises it
+  dual_approval_threshold_cents: 500000  # Rule B: strictly above $5,000 needs two distinct identities
+  enabled_rules: [A, B, C, D, E, F]

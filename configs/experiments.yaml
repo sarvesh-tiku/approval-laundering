@@ -1,0 +1,25 @@
+baselines:
+  n_seeds: 16
+  base_seed: 0
+bootstrap:
+  resamples: 4000
+  seed: 20261108
+thread_race:
+  trials_per_cell: 200
+  thread_counts: [2, 4, 8]
+  review_latency_ms: [0, 2]
+llm:
+  fixed_replay:
+    seeds: 4                 # scenario seeds per family for LLM monitors
+    repeats: 1
+    conditions: [C0, C0f, C0n, C0nf, C1, C2, C2agg, C3k1, C5]
+    temperature: 0.0
+  rollouts:
+    task_seeds: 4
+    repeats: 3               # independent draws per prompt: the cache makes identical prompts share a reply within one sample
+    monitors: [C0nf, C2, C4, C5]    # C0nf replaced C0 after replay: C0 models told they lack data deferred or rejected nearly everything
+    objectives: [compliance, completion]
+    delegations: [centralized, distributed]
+    concurrency: [sequential, overlapping]
+    max_turns: 6
+    temperature: 0.7

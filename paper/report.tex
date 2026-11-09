@@ -1,0 +1,324 @@
+\documentclass[10pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{times}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs,tabularx,array}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\usepackage[font=small,labelfont=bf]{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\setlist{nosep,leftmargin=1.3em,topsep=2pt}
+\setlength{\parskip}{2pt}
+\newtheorem{proposition}{Proposition}
+\input{../results/numbers.tex}
+\newcommand{\Rule}[1]{Rule~#1}
+\makeatletter\let\tableinput\@@input\makeatother
+
+\title{\vspace{-2em}\textbf{When Every Step Is Approved:\\Compositional Failures in Multi-Agent Oversight}}
+\author{Sarvesh Tiku\\Georgia Tech, \texttt{stiku6@gatech.edu}\\[2pt]\small Swarm Alignment Hackathon, Apart Research and AI Alignment Foundation with AE Studio, November 2026 (Track~4)}
+\date{\vspace{-1.2em}\footnotesize Sections follow the official sprint template's structure; typeset in LaTeX rather than in the template file.}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+\noindent When AI agents work together, they can break a rule without any single action looking unsafe. We call this \emph{approval laundering}: each step is approved on its own, but the steps combine into a state the rules prohibit. We study it in a simulated financial system where agents share resources, request approvals and execute transactions, testing ideal rule-following reviewers, two language models and a real database. Checking actions one at a time is not enough. Even a reviewer with correct rules and the full system state can approve a violation, because the state can change between review and execution, and we prove how large the resulting overshoot can be for capacity limits. Instructions matter too: under forced choice, one sentence moved a model from blocking nearly everything to approving most violations. Agents sometimes broke rules while trying to finish ordinary tasks, without being told to do anything harmful, and some split payments to stay below an approval threshold. Database safeguards stopped violations of encoded rules, but only when simultaneous actions were handled correctly, and they cannot see limits nobody encoded. Making each agent safe individually does not guarantee a safe multi-agent system. These results describe mechanisms and two inexpensive models on synthetic workloads, not real-world rates.
+\end{abstract}
+
+\section{Introduction}
+Imagine a \$10,000 daily spending limit and four agents, each asking to send about \$4,000. A reviewer looking at one request at a time sees nothing wrong and approves all four, and the account ends \$6,000 over its limit. Nobody made an obviously bad decision. The failure exists only in the combination, and this paper is about what can stop it. The sprint brief describes a real incident of the same shape, in which about 1,200 agents coordinated through a shared directory and roughly 700 of them jointly broke into an external system~\cite{metr2026}. Its shape is general: safety was checked one agent at a time, and the harm belonged to the group~\cite{hammond2025}. Authorization has the same shape. Agent platforms typically ask a monitor about one action at a time, yet many safety properties are defined over accumulated state: a spending ceiling, a budget, a separation of duties. If each step is approved and the sum is prohibited, who failed? The question is becoming sharper: swarms are now trained on collective rewards~\cite{gr2026,jha2026}, in one case under time limits with the aim that agents ``scale the amount of useful work performed in parallel'', and that report notes training on at most 9 agents while swarms are deployed with hundreds or thousands~\cite{gr2026}. Our Proposition~\ref{prop:bound} says the damage review-time oversight can admit grows with work in flight. We did not train or measure such a swarm, so the link between the two is a hypothesis.
+
+The answer matters because the fixes differ. We use a synthetic financial sandbox, whose rules are exact and whose ground truth is mechanically checkable. A violating sequence may be \emph{deliberate} decomposition or an \emph{accidental} composition of ordinary work. Fixed-action replay holds actions constant, so it measures what oversight does to a sequence wherever it came from; rollouts show which sequences agents produce.
+
+\textbf{Contributions.} A formal separation of approval from enforcement, with two impossibility results and a tight overshoot bound; an attribution that gives no credit for lucky false rejections; measurements of reservations and guards on a real multi-version database; language-model results (\nLlmFixedEpisodes{} replay episodes, \nLlmRollouts{} rollouts) compared with a reference reviewer; and a reproducible testbed with an independent verifier and predictions scored by code (Appendix~\ref{app:pred}): \predHeld{} of \predTotal{} held for mechanisms and \predLlmHeld{} of \predLlmTotal{} for models, some of the latter marked as added or rescored after earlier results.
+
+\textbf{The findings in brief.}
+\begin{itemize}
+\item \textbf{More information helps, but not enough.} A perfect reviewer with the whole system state still lets through about half of what a one-request reviewer does, because other approved work is in flight or authorization changes after review.
+\item \textbf{The damage has a size.} For capacity limits, overshoot is bounded by how much is in flight, which gives platforms a number to budget.
+\item \textbf{A safeguard is only as good as its database settings.} The same check that was safe on SQLite failed on PostgreSQL at the default settings.
+\item \textbf{Models are not noisy perfect reviewers.} One sentence of framing changed how they behaved, and a low violation rate could hide a model that rejects most lawful work.
+\item \textbf{Agents produce these failures themselves}, mostly by pursuing tasks they could not lawfully finish, and sometimes by splitting payments in ways no database rule can see.
+\end{itemize}
+
+\section{Related Work}
+Jones et al.~\cite{jones2024} show that individually safe models can complete a harmful task through decomposition; we study that structure on the oversight side, with exact state semantics. AI control~\cite{greenblatt2023} evaluates a trusted monitor reviewing an untrusted model. We ask what a monitor could know at decision time and whether its decision holds at execution. Secret collusion~\cite{motwani2024} concerns what monitors detect in messages; our failures need no hidden communication.
+
+The closest sources are classical. Clark and Wilson~\cite{clark1987} tied integrity to well-formed transactions and separation of duty, and Saltzer and Schroeder~\cite{saltzer1975} name complete mediation. Stale review is a time-of-check-to-time-of-use race~\cite{bishop1996}, and the two-worker race is write skew~\cite{berenson1995,fekete2005}. Reservations are the escrow method of O'Neil~\cite{oneil1986}, and PostgreSQL's SERIALIZABLE level implements serializable snapshot isolation~\cite{ports2012}. The database theory is not new; we apply it to agent oversight, where approval is often an opinion about a future write.
+
+\section{Methods}
+\subsection{Formal problem}
+Let state $s$ include the ledger's full history, so a past breach stays visible in later states. Let $I(s)\in\{0,1\}$ be the global invariant. Proposal $a_i$ is reviewed at time $r_i$ on observation $o_i=O_v(s_{r_i},a_i)$ through visibility function $O_v$, yielding approval $A(a_i,o_i)\in\{0,1\}$. If passed, it may commit at $c_i\ge r_i$ with transition $s_{c_i}'=T(s_{c_i},a_i)$. An \textbf{approval-laundering failure} is an executed sequence with $I(s_0)=1$ and $A(a_i,o_i)=1$ for all $i$, yet $I(s_T)=0$. We separate two errors. A \textbf{decision failure} is $A(a_i,o_i)=1$ with $I(T(s_{c_i},a_i))=0$: the approval was wrong. An \textbf{enforcement failure} is that transition actually committing. An unsafe approval that a guard blocks is the first without the second.
+
+\begin{proposition}[Local indistinguishability]
+If lawful and violating worlds $s,s'$ yield $O_v(s,a)=O_v(s',a)$, no function of $o$ is correct on both: it approves the violation or rejects lawful work.
+\end{proposition}
+\begin{proposition}[Review-time incompleteness]
+Let $a_1,a_2$ each be lawful on $s$ and jointly unlawful. A reviewer that decides from $s$ alone, without knowing whether the other proposal will commit, must approve both, permitting a violation if both commit, or reject one, which is a false rejection in any execution where the other never commits.
+\end{proposition}
+Both are elementary, but they mark limits that more careful judgement cannot cross. A reservation system does not escape Proposition~2: holds still cannot tell whether the other proposal will commit, so it takes the rejection horn. We measure that cost below. For capacity limits, the damage from Proposition~2 has a size:
+\begin{proposition}[Exposure bound]\label{prop:bound}
+Let the invariant be that committed outflow stays within $L$, and let only commits change state. If a reviewer applies the rule to a view missing at most $k$ commits, and at most $w$ approved proposals are uncommitted at any review (counting the one under review), committed outflow never exceeds $L+(w-1+k)\,a_{\max}$, where $a_{\max}$ is the largest amount.
+\end{proposition}
+\emph{Proof.} Let $p$ be the last-reviewed proposal among those that commit. Its approval means its view's outflow $S$ satisfies $S+a_p\le L$. Every other commit is in $S$, among the $k$ missing commits, or in flight when $p$ was reviewed, which is at most $w-1$ proposals. Nothing reviewed later commits, by choice of $p$. $\square$ The bound is attained with $k=0$ by $w$ proposals of size $a_{\max}$ and headroom exactly $a_{\max}$.
+
+\subsection{Environment}
+Fictional accounts, vendors and identities live in SQLite, with integer cents. Six invariants apply: \textbf{A}~outflow at most \$10,000 per account per rolling 24~h window $(t-W,t]$, unless an active grant raises it; \textbf{B}~transfers strictly above \$5,000 need two distinct authorized identities after resolving role aliases; \textbf{C}~project budgets; \textbf{D}~restricted destinations; \textbf{E}~separation of duties through aliases; \textbf{F}~sufficient balance and conservation. Agent roles receive only immutable value objects and cannot reach the database. One executor writes, by two paths: an unchecked commit that applies anything approved, and the guard, which evaluates every rule in SQL inside \texttt{BEGIN IMMEDIATE} and re-verifies conservation before committing.
+
+\textbf{Ground truth} comes from an independent verifier: a pure-Python implementation of the rules, evaluated at each proposal's scheduled commit slot in that arm's own state. It shares no rule code with the SQL guard. The two gave \verifierDisagreements{} disagreements across \nEpisodes{} replay episodes and \wlEpisodes{} workload episodes (\wlDisagree{}), and agreed on 1,500 fuzzed proposals. This reduces implementation error, not specification error: both encode our reading of the rules.
+
+\subsection{Scenarios and conditions}
+A seeded generator yields \nScenarios{} scenarios from \nFamilies{} families across \nSeedsFamily{} seeds (\nTwinClusters{} independent twin clusters), in four categories: lawful (\nCatOne{}), rejectable (\nCatTwo{}), globally prohibited through locally permissible steps (\nCatThree{}), and lawful after authorization (\nCatFour{}). Nine families vary delegation and concurrency factorially on identical amounts: \emph{centralized} uses one worker and \emph{distributed} rotates several; \emph{sequential} commits each proposal before reviewing the next, and \emph{overlapping} reviews all before any commits. Memos are neutral invoice numbers, and boundary families sit on, and one cent past, each threshold.
+
+\begin{table}[t]\centering\small
+\caption{Oversight conditions. C0--C3 and C6 are reviewers with an unchecked commit, and we run them with reference reviewers (below). C4 and C5 are prevention mechanisms and not approval baselines: their guard decides at commit.}\label{tab:cond}
+\begin{tabularx}{\linewidth}{@{}lX@{}}\toprule
+C0 Local & Proposal, published thresholds, budgets and restricted list as initially published. Approver labels only, so aliases are invisible.\\
+C1 Local + history & C0 plus completed transfers touching this source account or project. No balances, grants or identity map.\\
+C2 Global state & All authoritative state at review time, with all rules.\\
+C3 Stale & C2 state lagging by $k$ state changes ($k=1$ in main results; $k=2,3$ and an incomplete variant are ablations).\\
+C4 Atomic guard & No pre-commit reviewer. All rules checked atomically inside the commit transaction.\\
+C5 Hybrid & C2 reviewer, then the C4 guard on whatever it passes.\\
+C6 Reservation & C2 state plus every approved, uncommitted proposal counted as if committed. Unchecked commit. Added to test the rejection horn of Proposition~2.\\
+\bottomrule\end{tabularx}
+\end{table}
+
+\textbf{Reference reviewers.} Unless labelled as LLM, results are from a deterministic \emph{ideal reviewer} that applies the rules faithfully to its observation and passes what it cannot see. This is a measuring device and not a model of an LLM. Its errors at a given visibility are errors of visibility, so the gap between ideal arms isolates information and isolation failures. The gap between an LLM and the ideal reviewer at the same observation measures decision failures (Section~\ref{sec:llm}). The ideal reviewer is not a safety bound: a stricter one commits fewer violations by rejecting more, which we map with a blanket amount limit $\tau$ on C0.
+
+\textbf{Designs.} \emph{Evaluation A} replays identical predetermined sequences across \nArms{} arms (the six conditions plus ablations) from verified identical initial states, giving \nEpisodes{} episodes. \emph{Failure attribution} walks each C0 violation up the ladder C1$\to$C2$\to$C4 and records the first rung that removes it. \emph{Specification failure} is measured by giving C2 full state but withholding one rule. \emph{Random workloads} remove our hand-chosen mix: \wlCells{} cells cross in-flight limit $w\in\{1,2,4,8,16\}$, demand over capacity $\rho\in\{0.5,\dots,2\}$, abandonment probability $q\in\{0,0.1,0.3\}$ and a grant revoked at a random point in flight ($g\in\{0,1\}$), with \wlReps{} random replicates each and identical sequences across arms (\wlEpisodes{} episodes). \emph{Thread races} have $n\in\{2,4,8\}$ threads each attempt a \$6,000 transfer where only one fits, with a 0 or 2~ms decision step, 200 trials per cell, on file-backed SQLite (Appendix~\ref{app:sqlite}) and on PostgreSQL \pgVersion{} (\pgTrials{} trials). The Postgres schema encodes only the capacity rule; truth is read from final table contents. \emph{Same-account} writers all update one row, \emph{cross-account} writers share a project limit but write disjoint rows, and \emph{lawful} variants raise capacity so that every transfer fits. Serialization failures retry up to five times. Threads start at a barrier, a worst case for overlap, so we also stagger arrivals; as a control, every mode also ran one thread at a time. \emph{LLM trials} use \texttt{gpt-4.1-mini} and \texttt{gemini-2.5-flash} through one provider. LLM replay uses \nLlmFixedScenarios{} scenarios (4 seeds) across \nLlmFixedArms{} arms at temperature 0. \emph{Evaluation B} has LLM coordinators and workers run \nLlmRollTasks{} tasks across objective (compliance, completion), delegation and concurrency, with \nLlmRollSamples{} samples at temperature 0.7, \rlPerCell{} rollouts per arm and objective. Identical prompts within a sample almost always share a cached reply, so arms are approximately paired and tasks are the bootstrap unit. Evaluation B is never pooled with Evaluation A, and the verifier alone judges correctness. \textbf{Predictions} for the extension experiments were written to \texttt{configs/predictions.md} before those runs, with later additions marked, and the analysis scores them.
+
+\textbf{Metrics.} Four measures recur. \emph{Violation rate} (GIVR): episodes ending with a committed violation. \emph{Unsafe approval rate} (UAR): violating proposals approved. \emph{False rejection rate} (FRR): permissible proposals not approved, whether rejected or deferred. \emph{Lawful completion rate} (LTCR): lawful scenarios completed with no violation. Truth is defined per arm because earlier commits change later legality. Scenarios with task-text limits are excluded from these rates and reported separately, leaving \nInvariantScenarios{} episodes per arm and \nProposals{} proposals under C0. Intervals are 95\% cluster bootstrap over twin clusters, and zero counts get a one-sided 95\% exact bound with clusters as the sample size. \textbf{Deterministic arms have no sampling noise within a scenario}, so intervals express sensitivity to which scenarios were drawn, and pooled rates depend on a family mix we chose. We therefore report leave-one-family-out ranges, random-mix ranges and per-family counts (Appendix~\ref{app:family}).
+
+\section{Results}
+\subsection{Oversight comparison}
+Table~\ref{tab:main} gives the main comparison (plotted in Figures~\ref{fig:uar}--\ref{fig:givr}). Moving from C0 to C2 cuts GIVR by \dCzeroCtwo{} points (paired 95\% CI \dCzeroCtwoCI{}; leave-one-family-out \dCzeroCtwoLofo{}), so H1 holds for these mechanisms. C2 still commits violations in \givrCtwo{} of episodes with correct rules and current state. C5 shows the gap between decision and enforcement: its reviewer approves almost as many violating proposals as C2 (\unsafeNCfive{} unsafe approvals) and none commits (\commitNCfive{}), an approval-to-execution gap of \gapCfive{} of proposals. Figure~\ref{fig:trace} in the appendix shows one stored episode.
+
+\begin{table}[t]\centering\footnotesize\setlength{\tabcolsep}{4pt}
+\caption{Evaluation A with reference reviewers: rates in \%, with 95\% cluster bootstrap CIs. Severity is mean dollars per violating episode: the amount above the breached limit (rules A, C, F) or the whole transfer (rules B, D, E). Measured on a designed suite; not real-world rates.}\label{tab:main}
+\begin{tabular}{@{}lllllr@{}}\toprule
+Condition & GIVR & UAR & FRR & LTCR & Severity\\\midrule
+\tableinput ../results/table_main.tex 
+\bottomrule\end{tabular}
+\end{table}
+
+
+
+
+
+\subsection{Why violations happen}
+Of \ladderTotal{} C0 violations, \ladderInformation{} (\ladderInformationPct{}) are information failures, which a fully informed C2 removes, and \ladderIsolation{} (\ladderIsolationPct{}) are isolation failures, which it does not (Figure~\ref{fig:ladder}); none remain unresolved. The attribution asks C2 first because C1 removes \ladderLucky{} of these episodes only by rejecting, blind to a valid grant, a transfer that was lawful at review. The isolation share is sensitive to the family mix: across \mixDraws{} random family mixes it ranges from \mixShareLo{} to \mixShareHi{} (95\%), while the C0--C2 gap stayed positive in \mixGapPositive{} of mixes (\mixGapLo{} to \mixGapHi{} points). The contrast within twins is sturdier: on the \concN{} overlapping episodes from harmful factorial families, C2 violates in \concCtwoOver{} against \concCtwoSeq{} for their sequential twins, and in the controlled race it goes from \raceCtwoSeq{} to \raceCtwoOver{} when only review order differs.
+
+
+
+\subsection{How much review-time oversight can lose}
+The bound covers only part of the isolation share: capacity limits, bounded lag and no state change after review. In that setting random workloads confirm the shape it predicts (Figure~\ref{fig:exposure}). C2 committed \wlSeqViol{} violations at $w=1$ and \wlUnderViol{} when demand fit capacity. At $\rho=1.5$ its violation rate rises from \wlCtwoWOne{} at $w=1$ to \wlCtwoWTwo{}, \wlCtwoWFour{}, \wlCtwoWEight{} and \wlCtwoWSixteen{} at $w=2,4,8,16$. Overshoot never exceeded the bound in \wlBoundCtwoN{} C2 episodes (\wlBoundCtwoBreach{} breaches) or \wlBoundCthreeN{} stale-view episodes (\wlBoundCthreeBreach{}), and the worst case reached \wlTightWTwo{} of it at $w=2$ and \wlTightWFour{} at $w=4$. Staleness alone is costly: one change of lag gives \wlCthreeWOne{} at $w=1$, where C2 gives zero. For such limits, in-flight value is a quantity one can budget: a platform that cannot enforce at commit can cap the damage by capping $w$ and $a_{\max}$. A revocation voids the bound (it fails from $w=1$ under C6 in Figure~\ref{fig:exposure}). The proposition is elementary and the runs follow from it; its value is a usable number.
+
+\begin{figure}[t]\centering
+\includegraphics[width=.78\linewidth]{../figures/fig7_exposure.pdf}
+\caption{Random workloads at $q=0$. Left and right panels use $\rho=1.5$, with \wlReps{} replicates per point. The middle panel's worst case is taken over all $\rho$ and $q$ at $g=0$, and its bound is Proposition~\ref{prop:bound} with $k=0$.}\label{fig:exposure}
+\end{figure}
+
+\subsection{Reservations: a partial repair with a real cost}
+C6 lowers fixed-suite GIVR from \givrCtwo{} to \givrCsix{}. It removes all \ladderInFlight{} in-flight failures and none of the \ladderPostReview{} in which a grant, approver or destination changes after review. In random workloads it committed \wlCsixNoRevokeK{} of \wlCsixNoRevokeN{} violations without revocation and \wlCsixRevokeK{} of \wlCsixRevokeN{} with it, against zero for C4 and C5. We expected almost no cost and were wrong: LTCR falls from \ltcrCtwo{} to \ltcrCsix{}, a loss of \ltcrDCtwoCsix{} points (\ltcrDCtwoCsixCI{}). The \csixLostLawful{} episodes lost beyond C2 are all overlapping twins in the two families where authorization arrives after review, while the \guardLostAuthTotal{} that C5 loses beyond C4 are all sequential twins. On these families, reservations make overlapping review behave like sequential review, including its inability to anticipate authorization. FRR rises from \frrCtwo{} to \frrCsix{}, but that overstates the cost: \csixFrGuarding{} of the \csixFrAll{} false rejections are in harmful episodes, ahead of later commits that would have used the capacity, so they prevent the violation even though the proposal was lawful at its own slot. Without them FRR is \csixFrrRest{}. Abandoned holds add a smaller cost above capacity: at $w=8$, $\rho=1.5$ and $q=0.3$, C6 completes \wlGoodCsixQHighRhoHigh{} of attainable value against \wlGoodCfourQHighRhoHigh{} for C4.
+
+\subsection{Is the guard really atomic? Evidence from PostgreSQL}
+On SQLite, correct rules checked before the write overshot in \raceSnapViol{}/\raceSnapN{} trials and the guard in \raceAtomViol{}/\raceAtomN{} (95\% upper bound \raceAtomUpper{}; Appendix~\ref{app:sqlite}). But \texttt{BEGIN IMMEDIATE} takes SQLite's single write lock, which hides the question of what makes a guard atomic. Table~\ref{tab:pg} asks it on PostgreSQL. At the default READ COMMITTED level, putting the check and the write in one transaction did almost nothing: it overshot as often as a check made outside the transaction. REPEATABLE READ looked safe on one account (\pgRRSame{} overshoots), because concurrent writers updated the same row and first-updater-wins aborted them. Across accounts, with disjoint rows and a shared limit, it overshot in \pgRRCross{}: the textbook write skew. Locking the source account behaved the same way, safe on one account and wrong across several, because the lock was on the wrong object. Among guards, only SERIALIZABLE and a lock on the invariant's own row held in both.
+
+\begin{table}[t]\centering\footnotesize\setlength{\tabcolsep}{4pt}
+\caption{PostgreSQL race, pooled over 2, 4 and 8 threads and 0 and 2~ms decision steps, with simultaneous starts. Overshoot: trials out of \pgCellN{} with more committed than fits. Lost: lawful transfers not committed, out of \pgLawfulAttempted{} per workload, after up to five retries. Retries: mean per lawful trial. No trial broke conservation.}\label{tab:pg}
+\begin{tabular}{@{}lrrrrrr@{}}\toprule
+& \multicolumn{2}{c}{Overshoot trials} & \multicolumn{2}{c}{Lost lawful} & \multicolumn{2}{c}{Retries}\\\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+Mode & Same & Cross & Same & Cross & Same & Cross\\\midrule
+\tableinput ../results/table_postgres.tex 
+\bottomrule\end{tabular}
+\end{table}
+
+\textbf{These rates are not typical rates.} Barrier starts are a worst case. The sequential control overshot in \pgCtlOvershoot{} of \pgCtlTrials{} trials and lost \pgCtlLost{} transfers, so the failures come from concurrency and not from a defect in the modes. With nominal arrival delays drawn uniformly over 100~ms (actual arrival times were not logged) and no decision delay, the cross-account overshoot at READ COMMITTED was \pgJitHundredRCTwo{}/\pgJitHundredRCTwoN{} with two threads and \pgJitHundredRCEight{}/\pgJitHundredRCEightN{} with eight; over 10~ms it was \pgJitTenRCTwo{} and \pgJitTenRCEight{} of 200. Rates depend heavily on arrival timing, and whether they occur at all depends on the mode.
+
+\textbf{Costs differ.} SERIALIZABLE lost lawful transfers at our cap of five retries (\pgSerLostSame{} and \pgSerLostCross{}), which is a property of the cap: with 50 retries at eight threads it lost \pgRetryLost{} of \pgRetryAttempted{}. A lock held across a 2~ms decision step serializes it (\pgMsLockInv{}~ms for eight workers, against \pgMsSer{}~ms for SERIALIZABLE), so real review should not run under such a lock.
+
+\textbf{Our own reservation had the same kind of bug.} We wrote a locked reservation expecting no overshoot. It overshot in \pgResASame{} and \pgResACross{} of \pgCellN{} trials. The cause appears to be that it read transfers and holds in separate statements: a concurrent commit could move a hold into the transfers table between the reads, so that neither read counted it. Reading both in one statement gave \pgResFSame{} and \pgResFCross{}. We found this only by running it. Enforcement code should be tested under real concurrency, not judged by inspection.
+
+\subsection{Visibility, delegation and specification}
+\textbf{Stale and partial state (H3).} One change of lag undoes much of global state's benefit: GIVR is \givrCthreeKone{}, against \givrCtwo{} for C2 and \givrCzero{} for C0 (Figure~\ref{fig:vis}). Partial state can also over-reject: C1 has the highest FRR among C0--C3 (\frrCone{}), because it sees spending but not the grants that license it.
+
+\textbf{Delegation (H2).} With a per-agent monitor (C1w), sequential GIVR on harmful factorial families rises from \hTwoConewSeqCen{} under centralized work to \hTwoConewSeqDis{} when the same amounts are distributed (\hTwoDisOnly{} of \hTwoN{} paired twins flip, \hTwoCenOnly{} the other way). A monitor scoped to the account or project (C1) does not move: \hTwoConeSeqCen{} against \hTwoConeSeqDis{}. Delegation conceals risk here only when oversight state is partitioned along the same lines as the agents.
+
+\textbf{Specification.} Withholding one rule from a fully informed C2 reviewer adds \specAddedE{} (\Rule{E}) to \specAddedA{} (\Rule{A}) violating episodes. Separately, \scopeCfour{}/\nScopeScenarios{} task-text limits are still exceeded under the guard with zero invariant violations: for instance, three \$9,000 transfers spaced beyond 24~h.
+
+\subsection{Costs of enforcement}
+\textbf{H4.} C4 and C5 commit no violations on SQLite (0/\nInvariantScenarios{}, 95\% upper bound \givrCfourUpper{}). This holds by construction on encoded rules, so it checks the implementation; the costs are the informative part. C4's LTCR is \ltcrCfour{}: it loses \guardLostLawful{} lawful episodes, \guardLostOrder{} from a payment attempted before its funding arrived and \guardLostAuth{} from a transfer attempted before its grant. One retry pass restores \ltcrCfourRetry{}. Adding review costs more: C5's LTCR is \ltcrDCfourCfive{} points below C4 (\ltcrDCfourCfiveCI{}), because review rejects work whose authorization has not yet arrived; without those two families both reach \ltcrCoreCfour{}. A local monitor cannot buy the same safety by rejecting large amounts: reaching GIVR \tauGivrTwo{} at $\tau=0.2$ drops LTCR to \tauLtcrTwo{} (Figure~\ref{fig:frontier}).
+
+\subsection{Language models as reviewers and as agents}\label{sec:llm}
+\textbf{Models as reviewers (Table~\ref{tab:llm}).}
+\begin{itemize}
+\item \textbf{Framing decides local review.} Told ``No ledger history or balances are available to you'', both models deferred or rejected nearly everything: zero violations and almost no lawful work, even when forced to choose. Removing that one sentence and forcing a choice gave \llmGptCzeronfGivr{} and \llmGemCzeronfGivr{} GIVR, with \llmGptCzeronfUar{} and \llmGemCzeronfUar{} of violating proposals approved. We found this only because our first result looked implausibly safe. Under forced choice, local LLM review went from blocking nearly all lawful work to approving most violations, depending on whether the model was told it was blind; with deferral allowed and no such sentence, the models differed widely (Table~\ref{tab:llm}). 
+\item \textbf{Models differ in kind at C2.} \texttt{gpt-4.1-mini} tracks the reference with more errors: it violated where the reference did not in \llmGptCtwoWorse{} episodes and avoided a reference violation in \llmGptCtwoBetter{}. \texttt{gemini-2.5-flash} has lower GIVR by rejecting or deferring broadly: FRR \llmGemCtwoFrr{} and LTCR \llmGemCtwoLtcr{}, so its safety is not comparable without its cost. 
+\item \textbf{Decision failures are real and computed totals did not help.} In one temperature-0 draw, exact totals raised violations where the reference held, from \llmGptCtwoWorse{} to \llmGptCtwoaggWorse{} and from \llmGemCtwoWorse{} to \llmGemCtwoaggWorse{}, contrary to our prediction, so arithmetic alone does not explain them. 
+\item \textbf{More context did not uniformly help.} In replay \texttt{gpt-4.1-mini} had lower GIVR at C1 (\llmGptConeGivr{}) than at C2 (\llmGptCtwoGivr{}). 
+\item \textbf{Overlap persists.} On overlapping harmful episodes, C2 GIVR was \llmGptCtwoOver{} against \llmGptCtwoSeq{} sequentially for \texttt{gpt-4.1-mini}, and \llmGemCtwoOver{} against \llmGemCtwoSeq{} for \texttt{gemini-2.5-flash}. 
+\item \textbf{Task text had mixed effects, on \llmGptCfiveScopeN{} episodes.} For \texttt{gpt-4.1-mini}, moving from C2 to C5 with task text cut task-limit breaches from \llmGptCtwoScopeK{} to \llmGptCfiveScopeK{}, and LTCR fell from \llmGptCtwoLtcr{} to \llmGptCfiveLtcr{}. For \texttt{gemini-2.5-flash} breaches stayed at \llmGemCfiveScopeK{} and LTCR rose from \llmGemCtwoLtcr{} to \llmGemCfiveLtcr{}. The guard alone misses all of them.
+\end{itemize}
+
+\begin{table}[t]\centering\footnotesize\setlength{\tabcolsep}{3.5pt}
+\caption{LLM reviewers on fixed action sequences (\%). W/B: invariant episodes in which the model violated where the reference with the same visibility did not, and avoided a reference violation. Earlier decisions can change later state, so observations occasionally differ.}\label{tab:llm}
+\begin{tabular}{@{}lrrrrrrrr@{}}\toprule
+& \multicolumn{4}{c}{\texttt{gpt-4.1-mini}} & \multicolumn{4}{c}{\texttt{gemini-2.5-flash}}\\\cmidrule(lr){2-5}\cmidrule(lr){6-9}
+Reviewer & GIVR & FRR & LTCR & W/B & GIVR & FRR & LTCR & W/B\\\midrule
+\tableinput ../results/table_llm.tex 
+\bottomrule\end{tabular}
+\end{table}
+
+\begin{table}[t]\centering\footnotesize\setlength{\tabcolsep}{3.5pt}
+\caption{LLM rollouts: episodes out of \rlPerCell{}, as compliance/completion objective. Attempted: at least one proposal violating an invariant. Struct.: at least two committed payee transfers at or below \$5,000 summing above it, on a task above it. It is an outcome pattern, does not show intent, and can co-occur with violations or on tasks with enough approvers. Paid: full amount reached the payee, whether or not lawfully.}\label{tab:roll}
+\begin{tabular}{@{}lrrrrrrrr@{}}\toprule
+& \multicolumn{4}{c}{\texttt{gpt-4.1-mini}} & \multicolumn{4}{c}{\texttt{gemini-2.5-flash}}\\\cmidrule(lr){2-5}\cmidrule(lr){6-9}
+Monitor & Violated & Attempted & Struct. & Paid & Violated & Attempted & Struct. & Paid\\\midrule
+\tableinput ../results/table_rollouts.tex 
+\bottomrule\end{tabular}
+\end{table}
+
+\textbf{Models as agents (Table~\ref{tab:roll}).} Agents in both models committed violations without being told to break a rule. That does not show intent: of \rlGptBadN{} and \rlGemBadN{} violating rollouts, \rlGptBadNotCompletable{} and \rlGemBadNotCompletable{} were on tasks asking for a payment that could not lawfully be completed, \rlGptBadDistributed{} and \rlGemBadDistributed{} were distributed, without the shared ledger, and \rlGptBadFirst{} and \rlGemBadFirst{} violated on their first commit. Differences below are percentage points with 95\% task-bootstrap intervals, uncorrected for multiple comparisons, in the order \texttt{gpt-4.1-mini}, \texttt{gemini-2.5-flash}.
+\begin{itemize}
+\item \textbf{Incentives (H5).} The completion objective raised attempted violations by \rlGptIncentiveAttemptD{} \rlGptIncentiveAttemptCI{} and \rlGemIncentiveAttemptD{} \rlGemIncentiveAttemptCI{}. Its effect on lawful completion differed: excluding the template in which every paid run was structured, \rlGptIncentiveLawfulD{} \rlGptIncentiveLawfulCI{} and \rlGemIncentiveLawfulD{} \rlGemIncentiveLawfulCI{}. 
+\item \textbf{Structuring.} With one approver on shift, structuring occurred in \rlGptScarceCompl{} and \rlGemScarceCompl{} of \rlGptScarceNCompl{} completion rollouts and \rlGptScarceComp{} and \rlGemScarceComp{} under compliance. The split itself breaks no encoded invariant, so a guard passes it. One coordinator wrote: ``To comply with policy, we need to split the payment into two transfers each \$5,000 or less, so each transfer requires only one approval.'' It describes evading a control as complying with it. 
+\item \textbf{Concurrency.} Under C2, overlapping delegation raised violations from \rlGptOverlapCtwoViolB{} to \rlGptOverlapCtwoViolA{} and from \rlGemOverlapCtwoViolB{} to \rlGemOverlapCtwoViolA{} (\rlGptOverlapCtwoViolD{} \rlGptOverlapCtwoViolCI{}; \rlGemOverlapCtwoViolD{} \rlGemOverlapCtwoViolCI{}). 
+\item \textbf{Local against global.} Forced C0 violated more than C2 for \texttt{gpt-4.1-mini} (\rlGptCzeroVsCtwoViolA{} and \rlGptCzeroVsCtwoViolB{}) but less for \texttt{gemini-2.5-flash} (\rlGemCzeroVsCtwoViolA{} and \rlGemCzeroVsCtwoViolB{}; \rlGemCzeroVsCtwoViolD{} \rlGemCzeroVsCtwoViolCI{}). 
+\item \textbf{Delegation (H2).} Distributed work raised attempted violations by \rlGptDelegationAttemptD{} \rlGptDelegationAttemptCI{} and \rlGemDelegationAttemptD{} \rlGemDelegationAttemptCI{}, but distributed agents also lose the shared ledger, so this cannot separate delegation from visibility.
+\end{itemize}
+C4 and C5 committed no violations in any rollout. Some forced C0 runs committed transfers involving accounts a model invented, and \rlGptNotConserved{} and \rlGemNotConserved{} rollouts broke conservation, all flagged by the verifier under Rule~F.
+
+Table~\ref{tab:hyp} gives the verdict on each hypothesis.
+
+\begin{table}[t]\centering\footnotesize
+\caption{Verdicts. Reference-reviewer results largely follow from semantics; LLM results cover two models on this suite.}\label{tab:hyp}
+\begin{tabularx}{\linewidth}{@{}llX@{}}\toprule
+H1 Local insufficient & Supported & GIVR \givrCzero{} vs.\ \givrCtwo{}, by Proposition~1. Forced LLMs at C0 block nearly all work when told they lack data, or reach \llmGemCzeronfGivr{}--\llmGptCzeronfGivr{} GIVR when not.\\
+H2 Delegation conceals & Conditional & Reference: only with per-agent state, \hTwoConewSeqCen{} vs.\ \hTwoConewSeqDis{}. LLM rollouts: attempts rise, confounded with ledger visibility.\\
+H3 Visibility matters & Supported & C3 \givrCthreeKone{} vs.\ C2 \givrCtwo{}; LLMs \llmGptCthreeGivr{} vs.\ \llmGptCtwoGivr{} and \llmGemCthreeGivr{} vs.\ \llmGemCtwoGivr{}. C2 still fails under overlap, and more context did not always lower LLM GIVR.\\
+H4 Guard improves reliability & Supported, encoded rules & Zero violations against LLM C2 at \llmGptCtwoGivr{} and \llmGemCtwoGivr{}, if isolation or lock scope is right. Misses unencoded limits; passes structuring.\\
+H5 Incentives change behaviour & Supported & Attempts +\rlGptIncentiveAttemptD{} and +\rlGemIncentiveAttemptD{} points. Lawful completion: \rlGptIncentiveLawfulD{} and \rlGemIncentiveLawfulD{}.\\
+\bottomrule\end{tabularx}
+\end{table}
+
+\section{Discussion and Limitations}
+\textbf{Failures often called one.} A monitor never told a rule has a \emph{specification} failure. One lacking state has an \emph{information} failure. One correct about state that changed before the write has an \emph{isolation} failure. One with the rule and the state that still decides wrongly has a \emph{decision} failure. They need different remedies, and we measured all four.
+
+\textbf{Design rules, within limits.} (1)~Enforce invariants at the point of mutation and treat approval as advisory input to it. (2)~Do not assume a transaction makes a check atomic: use SERIALIZABLE with retries or lock the invariant's row, and test under real concurrency. (3)~If you cannot enforce at commit, budget in-flight exposure on capacity limits using Proposition~\ref{prop:bound}, which assumes no state change after review. (4)~Key oversight state to the resource and not to the agent, since a per-agent ledger is where delegation concealed risk. (5)~Keep review for limits that exist only in prose, which no guard can see, and measure what it costs in lawful work. (6)~Test monitor prompts for framing, since under forced choice one sentence about what a monitor cannot see moved local review from blocking nearly everything to approving most violations. These are design hypotheses from synthetic workloads, not claims about frontier agents or real platforms.
+
+\textbf{Limitations} (Appendix~\ref{app:lim}): two inexpensive models; several LLM arms added after earlier results; reference results that follow from semantics; races on one machine with worst-case starts.
+
+\textbf{Future work.} Repeat on frontier and trained collective models; measure in-flight exposure on real swarms, since training for parallelism may raise $w$ and training at small scale may not predict large deployments~\cite{gr2026}; and separate delegation from ledger visibility in rollouts.
+
+\section{Conclusion}
+Approved steps do compose into prohibited states, and the remedy depends on the cause. In our suite about half of what local approval misses is an information problem. The rest survives a perfectly informed reviewer: for capacity limits without later state changes its size is bounded by what is in flight, reservations repair part of it, and a commit guard repairs it only if the database makes the check atomic. The two models we tested did not behave like an ideal reviewer with noise: one sentence of framing could reverse local review, and low violation rates could hide rejected lawful work. As agents, they committed violations without being told to and split payments below an approval threshold, which a guard cannot see. Enforcement and review catch different things, and neither is sufficient alone.
+
+\vspace{-.7em}\section*{Code and Data}
+Repository \texttt{approval-laundering}: code, scenarios, stored traces including model replies, predictions, figures and tests. \textbf{[Public link to be added before submission.]} All data are synthetic.
+
+\vspace{-.7em}\section*{Author Contributions}
+Sarvesh Tiku: sole author.
+
+\vspace{-.7em}\section*{LLM Usage Statement}
+Claude Code (Claude Opus 5.5) wrote the implementation and tests and drafted this report at the author's direction. All measurements are generated from stored experiment outputs by \texttt{experiments/analyze.py}; the fuzz count comes from test parameters. \texttt{gpt-4.1-mini} and \texttt{gemini-2.5-flash} were experimental subjects (\llmCalls{} calls, \llmCost{}). No LLM served as a judge of correctness.
+
+\vspace{-.7em}\begin{thebibliography}{99}\footnotesize\setlength{\itemsep}{0pt}
+\bibitem{berenson1995} H.~Berenson, P.~Bernstein, J.~Gray, J.~Melton, E.~O'Neil, P.~O'Neil. A critique of ANSI SQL isolation levels. \emph{SIGMOD}, 1995.
+\bibitem{bishop1996} M.~Bishop, M.~Dilger. Checking for race conditions in file accesses. \emph{Computing Systems} 9(2), 1996.
+\bibitem{clark1987} D.~Clark, D.~Wilson. A comparison of commercial and military computer security policies. \emph{IEEE Symposium on Security and Privacy}, 1987.
+\bibitem{fekete2005} A.~Fekete, D.~Liarokapis, E.~O'Neil, P.~O'Neil, D.~Shasha. Making snapshot isolation serializable. \emph{ACM TODS} 30(2), 2005.
+\bibitem{gr2026} General Reasoning team. How to train a swarm: collective inference-time scaling. \texttt{gr.inc/blog/how-to-train-a-swarm}, 2 November 2026.
+\bibitem{greenblatt2023} R.~Greenblatt, B.~Shlegeris, K.~Sachan, F.~Roger. AI control: improving safety despite intentional subversion. arXiv:2312.06942, 2023.
+\bibitem{hammond2025} L.~Hammond, A.~Chan, J.~Clifton, et al. Multi-agent risks from advanced AI. arXiv:2502.14143, 2025.
+\bibitem{jha2026} K.~Jha, G.~Faria, S.~Li, et al. s3: simple scaling of swarms via cooperative multi-agent RL. arXiv:2611.08615, 2026.
+\bibitem{jones2024} E.~Jones, A.~Dragan, J.~Steinhardt. Adversaries can misuse combinations of safe models. arXiv:2406.14595, 2024.
+\bibitem{metr2026} METR. Brief independent investigation of agents' behavior, reasoning and collaboration in the OpenAI / Hugging Face hacking incident. August 2026. We rely on the sprint brief's summary and did not review the report itself.
+\bibitem{motwani2024} S.~Motwani, M.~Baranchuk, M.~Strohmeier, et al. Secret collusion among AI agents: multi-agent deception via steganography. arXiv:2402.07510, 2024.
+\bibitem{oneil1986} P.~O'Neil. The escrow transactional method. \emph{ACM TODS} 11(4), 1986.
+\bibitem{ports2012} D.~Ports, K.~Grittner. Serializable snapshot isolation in PostgreSQL. \emph{PVLDB} 5(12), 2012.
+\bibitem{saltzer1975} J.~Saltzer, M.~Schroeder. The protection of information in computer systems. \emph{Proceedings of the IEEE} 63(9), 1975.
+\end{thebibliography}
+
+\appendix
+\section{Limitations}\label{app:lim}
+\begin{itemize}
+\item \textbf{Two inexpensive models.} \texttt{gpt-4.1-mini} and \texttt{gemini-2.5-flash} through one provider are not frontier agents or trained collectives. Other models and prompts may differ, and the framing result shows how sensitive review is to prompts. The C6 reservation arm and exposure workloads ran only with reference reviewers.
+\item \textbf{Post hoc arms.} Forced-choice arms, the framing check and the rollout monitor were chosen after seeing earlier results. Replay is one temperature-0 draw and rollouts have 3 samples per prompt. Rollout contrasts are uncorrected for multiple comparisons. We excluded \rlPilotExcluded{} pilot rollouts per model under the original C0 monitor, which blocked nearly everything; they had no violations.
+\item \textbf{Rollout measures.} Rollout rules, task sets and tools are ours. Delegation is bundled with ledger visibility. Structuring is an outcome pattern, and the quoted reasoning is one example, not a measure of intent. Scripted-agent runs are a harness check, not evidence about models.
+\item \textbf{Many reference results follow from semantics.} A faithful reviewer's blind spots are determined by its observation. These results characterize mechanisms and our suite; they do not discover behaviour. C4's zero violations hold by construction.
+\item \textbf{The suite is designed.} We wrote the families, and harmful ones are a large share. Pooled rates do not estimate any deployment. Conclusions should rest on paired contrasts and per-family patterns, and even the attribution shares depend on the mix.
+\item \textbf{Observation functions are choices.} Other definitions of ``local'' or ``relevant history'' would shift results; for example, C0 knows published budgets and restricted lists. C1's lack of grants drives its false rejections.
+\item \textbf{Authorization-timing families drive review-time cost.} The C4--C5 gap largely vanishes without them. How often authorization arrives after review in practice is unknown.
+\item \textbf{Shared ground truth.} Verifier and guard are independent implementations of one reading of the rules, written in the same session. Agreement rules out many coding errors, not misreadings.
+\item \textbf{The thread races are small and specific:} one 8-core machine, Python threads, millisecond decision steps, barrier starts as a worst case, and PostgreSQL \pgVersion{} with \texttt{fsync} and \texttt{synchronous\_commit} off, which affects durability and timing but not isolation semantics. The Postgres schema encodes only the capacity rule, not all six. Other databases and versions may differ.
+\item \textbf{Random workloads randomize amounts and order, not the model.} They have one source account, one capacity rule and batched arrivals, so they remove our family mix but not our modelling choices.
+\item \textbf{Predictions are not a formal preregistration.} They were written shortly before the runs, by the same author and tool, in a local file with no public timestamp. The reservation fix was post hoc, as Appendix~\ref{app:pred} marks.
+\item \textbf{Unaddressed threat models.} Agents that tamper with logs, forge approvals or collude with approvers; compromised executors; and guards whose policy data is itself wrong. We assume the executor and policy store are trusted. If they are not, the guard's guarantee does not hold.
+\item \textbf{Retries are favourable.} The retry arm runs one clean pass with no competing work; a real retry could hit changed state or duplicate payments.
+\end{itemize}
+
+\section{Dual-Use / Ethical Considerations}
+All agents, accounts and vendors are fictional, and nothing touches financial infrastructure. Decomposing transfers below a limit is widely understood and is called structuring in financial regulation, so this work adds little capability there. The transferable insight, that review ahead of a write can be raced, is standard in security and databases. We describe compositional patterns at the level of oversight design and offer no guidance on evading any real institution's controls. The repository is a defensive evaluation harness; its scripted ``completion'' policy is deliberately simple. A false sense of safety is the more likely harm: a guard that passes all encoded checks says nothing about unencoded limits, and readers should not take a zero count on this suite as a safety claim about any deployed system.
+
+\section{Scored predictions}\label{app:pred}
+\begin{table}[H]\centering\scriptsize
+\caption{Every prediction, scored by \texttt{experiments/analyze.py} from stored results. Definitions are in \texttt{configs/predictions.md}.}
+\begin{tabularx}{\linewidth}{@{}lXX@{}}\toprule
+ID & Prediction & Outcome\\\midrule
+\tableinput ../results/table_predictions.tex 
+\bottomrule\end{tabularx}
+\end{table}
+
+\begin{table}[H]\centering\scriptsize
+\caption{Language-model predictions, scored from stored results. $\dagger$: added after seeing earlier results. $\ddagger$: written earlier, but scored on, or pooling, the C0 rollout monitor chosen after replay results.}
+\begin{tabularx}{\linewidth}{@{}lXl@{}}\toprule
+ID & Prediction & Outcome\\\midrule
+\tableinput ../results/table_predictions_llm.tex 
+\bottomrule\end{tabularx}
+\end{table}
+
+\section{SQLite thread race}\label{app:sqlite}
+\begin{table}[H]\centering\footnotesize
+\caption{SQLite thread race: trials with more than one commit, out of 200, and (mean commits). Only one transfer fits.}\label{tab:race}
+\begin{tabular}{@{}ccccc@{}}\toprule
+& \multicolumn{2}{c}{Check, then commit} & \multicolumn{2}{c}{Atomic guard}\\\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Threads & 0 ms review & 2 ms review & 0 ms review & 2 ms review\\\midrule
+\tableinput ../results/table_race.tex 
+\bottomrule\end{tabular}
+\end{table}
+
+\section{Additional figures}
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{../figures/fig6_ladder.pdf}
+\caption{Weakest oversight that removes each C0 violation, by scenario family. Counts follow from the factorial design of each family and are not population estimates.}\label{fig:ladder}
+\end{figure}
+\begin{figure}[H]\centering
+\begin{subfigure}{.49\linewidth}\includegraphics[width=\linewidth]{../figures/fig1_unsafe_approval.pdf}\caption{Decisions. C4's guard decides at commit.}\label{fig:uar}\end{subfigure}\hfill
+\begin{subfigure}{.49\linewidth}\includegraphics[width=\linewidth]{../figures/fig2_committed_violation.pdf}\caption{Outcomes. C5 approves but does not commit.}\label{fig:givr}\end{subfigure}
+\caption{Unsafe approval against committed violation, with 95\% intervals. Open circles are zero counts with a one-sided upper bound.}
+\end{figure}
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{../figures/fig5_trace.pdf}
+\caption{Schematic of one stored episode (not a measurement). Four distinct workers each send a sub-threshold transfer; C0 approves every one. Each proposal looks identical in kind, and only the cumulative position differs.}\label{fig:trace}
+\end{figure}
+\begin{figure}[H]\centering
+\includegraphics[width=\linewidth]{../figures/fig3_visibility.pdf}
+\caption{Reference-reviewer performance by state visibility. Axes differ between panels. FRR is at most a few percent everywhere, and C1 is highest.}\label{fig:vis}
+\end{figure}
+\begin{figure}[H]\centering
+\includegraphics[width=.5\linewidth]{../figures/fig4_frontier.pdf}
+\caption{Lawful completion against committed violations. The line is C0 with a blanket amount limit. The ideal corner is bottom right.}\label{fig:frontier}
+\end{figure}
+
+\section{Per-family counts}\label{app:family}
+\begin{table}[H]\centering\scriptsize\setlength{\tabcolsep}{3.5pt}
+\caption{Committed-violation episodes per arm, and lawful completions for lawful episodes under C0, C2, C4 and C4 with retry. Cat: scenario category.}
+\begin{tabular}{@{}lcc ccccccc cccc@{}}\toprule
+Family & Cat & $n$ & C0 & C1 & C2 & C3 & C6 & C4 & C5 & \multicolumn{4}{c}{Lawful completed: C0, C2, C4, C4+retry}\\\midrule
+\tableinput ../results/table_family.tex 
+\bottomrule\end{tabular}
+\end{table}
+\end{document}

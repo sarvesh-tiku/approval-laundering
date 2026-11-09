@@ -1,0 +1,8 @@
+{"models": ["openai/gpt-4.1-mini", "google/gemini-2.5-flash"], "calls": 1320, "cached": 0, "prompt_tokens": 805893, "completion_tokens": 61952, "cost_usd": 0.4071596, "repairs": 0, "parse_failures": 0, "phase": "fixed"}
+{"models": ["openai/gpt-4.1-mini", "google/gemini-2.5-flash"], "calls": 259, "cached": 25, "prompt_tokens": 138947, "completion_tokens": 34210, "cost_usd": 0.1191834, "repairs": 0, "parse_failures": 0, "phase": "rollouts"}
+{"models": ["openai/gpt-4.1-mini", "google/gemini-2.5-flash"], "calls": 6458, "cached": 8, "prompt_tokens": 3680682, "completion_tokens": 300547, "cost_usd": 1.9016547999999798, "repairs": 2, "parse_failures": 1, "phase": "fixed"}
+{"models": ["openai/gpt-4.1-mini", "google/gemini-2.5-flash"], "calls": 2216, "cached": 8, "prompt_tokens": 857028, "completion_tokens": 93652, "cost_usd": 0.49537759999999886, "repairs": 0, "parse_failures": 0, "phase": "fixed"}
+{"models": ["openai/gpt-4.1-mini"], "calls": 1372, "cached": 3085, "prompt_tokens": 817800, "completion_tokens": 154017, "cost_usd": 0.5735472000000005, "repairs": 0, "parse_failures": 0, "phase": "rollouts"}
+{"models": ["google/gemini-2.5-flash"], "calls": 955, "cached": 2684, "prompt_tokens": 592657, "completion_tokens": 155370, "cost_usd": 0.5662220999999995, "repairs": 1, "parse_failures": 0, "phase": "rollouts"}
+{"models": ["google/gemini-2.5-flash"], "calls": 2795, "cached": 8895, "prompt_tokens": 1737687, "completion_tokens": 452277, "cost_usd": 1.6517442600000012, "repairs": 15, "parse_failures": 15, "phase": "rollouts"}
+{"models": ["openai/gpt-4.1-mini"], "calls": 3186, "cached": 9601, "prompt_tokens": 1898646, "completion_tokens": 356778, "cost_usd": 1.3303032000000004, "repairs": 6, "parse_failures": 0, "phase": "rollouts"}
